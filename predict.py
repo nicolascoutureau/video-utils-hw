@@ -21,39 +21,27 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        video: Path = Input(description="Input video file to process"),
-        function: str = Input(
-            description="Video processing function to apply",
+        video: Path = Input(description="Input video file URL to process"),
+        task: str = Input(
+            description="Video processing task to perform",
             default="create_preview_video",
             choices=["create_preview_video", "boomerang"]
         ),
-        start_time: float = Input(
-            description="Start time in seconds for trimming (0 = start of video)",
-            default=0,
-            ge=0
-        ),
-        end_time: float = Input(
-            description="End time in seconds for trimming (-1 = end of video)",
-            default=-1
-        ),
-        preset: str = Input(
-            description="FFmpeg encoding preset (slower = better quality) - only used for boomerang",
-            default="medium",
-            choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
-        ),
-        bitrate: str = Input(
-            description="Target bitrate (e.g., '5M' for 5 Mbps, '20M' for 20 Mbps) - only used for boomerang",
-            default="20M"
-        ),
     ) -> Path:
-        """Process video with selected function using hardware-accelerated encoding when available"""
+        """Process video with selected task using hardware-accelerated encoding when available"""
         
-        if function == "create_preview_video":
+        # Default parameters
+        start_time = 0
+        end_time = -1
+        preset = "medium"
+        bitrate = "20M"
+        
+        if task == "create_preview_video":
             return self._create_preview_video(video, start_time, end_time, preset, bitrate)
-        elif function == "boomerang":
+        elif task == "boomerang":
             return self._create_boomerang(video, start_time, end_time, preset, bitrate)
         else:
-            raise ValueError(f"Unknown function: {function}")
+            raise ValueError(f"Unknown task: {task}")
     
     def _create_preview_video(
         self,
