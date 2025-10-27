@@ -54,8 +54,8 @@ class Predictor(BasePredictor):
         """Create a low resolution preview video optimized for web seeking
         
         This creates a smaller, more efficient version of the video by:
-        1. Reducing resolution to 360p
-        2. Using a lower bitrate while maintaining decent quality
+        1. Reducing resolution to 480p
+        2. Using a moderate bitrate while maintaining good quality
         3. Adding more frequent keyframes for better seeking
         4. Using H.264 codec for compatibility
         5. Optimizing audio for web streaming
@@ -319,11 +319,11 @@ class Predictor(BasePredictor):
         # Use GPU-accelerated scaling if we have hardware decoding
         if input_codec == "h264":
             cmd.extend([
-                "-vf", "scale_cuda=-2:360",  # GPU-accelerated scaling to 360p
+                "-vf", "scale_cuda=-2:480",  # GPU-accelerated scaling to 480p
             ])
         else:
             cmd.extend([
-                "-vf", "scale=-2:360",  # CPU scaling for non-h264 inputs
+                "-vf", "scale=-2:480",  # CPU scaling for non-h264 inputs
             ])
         
         # Optimized hardware encoding parameters
@@ -335,14 +335,14 @@ class Predictor(BasePredictor):
             "-rc-lookahead", "20",  # Lookahead for better quality
             "-spatial_aq", "1",  # Spatial adaptive quantization
             "-temporal_aq", "1",  # Temporal adaptive quantization
-            "-b:v", "300k",  # Target video bitrate (reduced from 500k)
-            "-maxrate", "400k",  # Maximum video bitrate (reduced from 600k)
-            "-bufsize", "600k",  # Buffer size (reduced from 1000k)
+            "-b:v", "700k",  # Target video bitrate
+            "-maxrate", "1000k",  # Maximum video bitrate
+            "-bufsize", "2000k",  # Buffer size
             "-g", "30",  # Keyframe interval
             "-bf", "0",  # No B-frames for baseline profile compatibility
             "-movflags", "+faststart",  # Enable fast start for web playback
             "-c:a", "aac",  # Use AAC audio codec
-            "-b:a", "64k",  # Audio bitrate (reduced from 96k)
+            "-b:a", "128k",  # Audio bitrate
             "-ac", "2",  # 2 audio channels (stereo)
             "-ar", "44100",  # Audio sample rate
             output_path
@@ -375,20 +375,20 @@ class Predictor(BasePredictor):
         # Add input and encoding parameters optimized for web preview
         cmd.extend([
             "-i", input_path,
-            "-vf", "scale=-2:360",  # Scale to 360p maintaining aspect ratio
+            "-vf", "scale=-2:480",  # Scale to 480p maintaining aspect ratio
             "-c:v", "libx264",  # Use H.264 codec
             "-preset", "medium",  # Balance between encoding speed and compression
-            "-crf", "30",  # Constant Rate Factor (increased from 28 for smaller files)
+            "-crf", "26",  # Constant Rate Factor (lower = better quality)
             "-profile:v", "baseline",  # Most compatible H.264 profile
             "-movflags", "+faststart",  # Enable fast start for web playback
             "-g", "30",  # Add keyframe every 30 frames
             "-sc_threshold", "0",  # Disable scene change detection
             "-keyint_min", "30",  # Minimum keyframe interval
-            "-b:v", "300k",  # Target video bitrate (reduced from 500k)
-            "-maxrate", "400k",  # Maximum video bitrate (reduced from 600k)
-            "-bufsize", "600k",  # Buffer size (reduced from 1000k)
+            "-b:v", "700k",  # Target video bitrate
+            "-maxrate", "1000k",  # Maximum video bitrate
+            "-bufsize", "2000k",  # Buffer size
             "-c:a", "aac",  # Use AAC audio codec
-            "-b:a", "64k",  # Audio bitrate (reduced from 96k)
+            "-b:a", "128k",  # Audio bitrate
             "-ac", "2",  # 2 audio channels (stereo)
             "-ar", "44100",  # Audio sample rate
             output_path
