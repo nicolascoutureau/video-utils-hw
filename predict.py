@@ -26,23 +26,25 @@ class Predictor(BasePredictor):
         task: str = Input(
             description="Video processing task to perform",
             default="create_preview_video",
-            choices=["create_preview_video", "boomerang", "reencode_for_web"]
+            choices=["create_preview_video", "boomerang", "reencode_for_web", "trim_precise"]
         ),
+        start_time: float = Input(description="Start time in seconds for trimming", default=0),
+        end_time: float = Input(description="End time in seconds for trimming (-1 for end of video)", default=-1),
     ) -> Path:
         """Process video with selected task using hardware-accelerated encoding when available"""
-        
+
         # Default parameters
-        start_time = 0
-        end_time = -1
         preset = "medium"
         bitrate = "20M"
-        
+
         if task == "create_preview_video":
             return self._create_preview_video(video, start_time, end_time, preset, bitrate)
         elif task == "boomerang":
             return self._create_boomerang(video, start_time, end_time, preset, bitrate)
         elif task == "reencode_for_web":
             return self._reencode_for_web(video, start_time, end_time)
+        elif task == "trim_precise":
+            return self._trim_video_precise(video, start_time, end_time)
         else:
             raise ValueError(f"Unknown task: {task}")
     
@@ -706,3 +708,112 @@ class Predictor(BasePredictor):
             error_msg = f"Software web encoding failed: {e.stderr.decode('utf-8', errors='replace')}"
             print(error_msg)
             raise RuntimeError(error_msg)
+
+    def _get_audio_bitrate(self, input_path: str) -> str:
+        """Get the audio bitrate of the input video"""
+        try:
+            cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=bit_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            bitrate_str = result.stdout.strip()
+            if bitrate_str and bitrate_str != "N/A":
+                return bitrate_str
+            return "128000"
+        except (subprocess.CalledProcessError, ValueError):
+            return "128000"
+
+    def _trim_video_precise(
+        self,
+        video: Path,
+        start_time: float,
+        end_time: float
+    ) -> Path:
+        """Trim video with precise duration using re-encoding
+
+        Unlike stream-copy trimming, this re-encodes the video for exact
+        frame-accurate duration. It probes the source bitrates to maintain
+        relative quality and file size.
+        """
+        output_file = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        output_path = output_file.name
+        output_file.close()
+
+        input_path = str(video)
+
+        # Probe source bitrates to maintain quality
+        video_bitrate = self._get_video_bitrate(input_path)
+        audio_bitrate = self._get_audio_bitrate(input_path)
+
+        video_bitrate_str = str(video_bitrate) if video_bitrate else "4000000"
+        audio_bitrate_str = str(audio_bitrate)
+
+        print(f"trim_precise: start={start_time}, end={end_time}, "
+              f"video_bitrate={video_bitrate_str}, audio_bitrate={audio_bitrate_str}")
+
+        cmd = ["ffmpeg", "-y"]
+
+        # Seek to start time
+        if start_time != 0:
+            cmd.extend(["-ss", str(start_time)])
+
+        cmd.extend(["-i", input_path])
+
+        # Use -t (duration) instead of -to for precise duration control
+        if end_time != -1:
+            duration = end_time - start_time
+            cmd.extend(["-t", str(duration)])
+
+        # Re-encode for precise trimming, matching source quality
+        if self.gpu_available:
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",
+                "-b:v", video_bitrate_str,
+            ])
+        else:
+            cmd.extend([
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-b:v", video_bitrate_str,
+            ])
+
+        cmd.extend([
+            "-c:a", "aac",
+            "-b:a", audio_bitrate_str,
+            "-movflags", "+faststart",
+            output_path
+        ])
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            print("trim_precise: completed successfully")
+            return Path(output_path)
+        except subprocess.CalledProcessError as e:
+            print(f"trim_precise re-encode failed, falling back to stream copy: "
+                  f"{e.stderr.decode('utf-8', errors='replace')}")
+            # Fallback: stream copy (fast but may not be frame-accurate)
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+            fallback_cmd = ["ffmpeg", "-y"]
+            if start_time != 0:
+                fallback_cmd.extend(["-ss", str(start_time)])
+            fallback_cmd.extend(["-i", input_path])
+            if end_time != -1:
+                duration = end_time - start_time
+                fallback_cmd.extend(["-t", str(duration)])
+            fallback_cmd.extend(["-c", "copy", output_path])
+            try:
+                subprocess.run(fallback_cmd, check=True, capture_output=True)
+                return Path(output_path)
+            except subprocess.CalledProcessError as e2:
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+                error_msg = f"trim_precise fallback failed: {e2.stderr.decode('utf-8', errors='replace')}"
+                print(error_msg)
+                raise RuntimeError(error_msg)
