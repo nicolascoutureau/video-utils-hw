@@ -746,15 +746,12 @@ class Predictor(BasePredictor):
 
         input_path = str(video)
 
-        # Probe source bitrates to maintain quality
-        video_bitrate = self._get_video_bitrate(input_path)
+        # Probe source audio bitrate to preserve audio quality
         audio_bitrate = self._get_audio_bitrate(input_path)
-
-        video_bitrate_str = str(video_bitrate) if video_bitrate else "4000000"
         audio_bitrate_str = str(audio_bitrate)
 
         print(f"trim_precise: start={start_time}, end={end_time}, "
-              f"video_bitrate={video_bitrate_str}, audio_bitrate={audio_bitrate_str}")
+              f"audio_bitrate={audio_bitrate_str}")
 
         cmd = ["ffmpeg", "-y"]
 
@@ -769,18 +766,21 @@ class Predictor(BasePredictor):
             duration = end_time - start_time
             cmd.extend(["-t", str(duration)])
 
-        # Re-encode for precise trimming, matching source quality
+        # Re-encode using constant quality (CRF/CQ) for minimal quality loss.
+        # CRF 17 is visually lossless for most content.
         if self.gpu_available:
             cmd.extend([
                 "-c:v", "h264_nvenc",
-                "-preset", "p4",
-                "-b:v", video_bitrate_str,
+                "-preset", "p7",
+                "-rc", "vbr",
+                "-cq", "17",
+                "-b:v", "0",
             ])
         else:
             cmd.extend([
                 "-c:v", "libx264",
-                "-preset", "fast",
-                "-b:v", video_bitrate_str,
+                "-preset", "slow",
+                "-crf", "17",
             ])
 
         cmd.extend([
