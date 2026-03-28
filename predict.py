@@ -41,6 +41,10 @@ class Predictor(BasePredictor):
         """Base ffmpeg command with concise error output."""
         return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
 
+    def _muxing_queue_args(self) -> list[str]:
+        """Increase the output muxing queue for streams with encoder delay."""
+        return ["-max_muxing_queue_size", "4096"]
+
     def _ffmpeg_has_support(self, list_arg: str, name: str) -> bool:
         """Check whether ffmpeg exposes a codec/filter in its capability lists."""
         try:
@@ -376,6 +380,7 @@ class Predictor(BasePredictor):
             "-b:v", bitrate,
             "-c:a", "aac",
             "-b:a", "128k",
+            *self._muxing_queue_args(),
             output_path
         ])
         
@@ -413,6 +418,7 @@ class Predictor(BasePredictor):
             "-b:v", bitrate,
             "-c:a", "aac",
             "-b:a", "128k",
+            *self._muxing_queue_args(),
             output_path
         ])
         
@@ -482,6 +488,7 @@ class Predictor(BasePredictor):
             "-b:a", "128k",  # Audio bitrate
             "-ac", "2",  # 2 audio channels (stereo)
             "-ar", "44100",  # Audio sample rate
+            *self._muxing_queue_args(),
             output_path
         ])
         
@@ -528,6 +535,7 @@ class Predictor(BasePredictor):
             "-b:a", "128k",  # Audio bitrate
             "-ac", "2",  # 2 audio channels (stereo)
             "-ar", "44100",  # Audio sample rate
+            *self._muxing_queue_args(),
             output_path
         ])
         
@@ -706,6 +714,7 @@ class Predictor(BasePredictor):
             "-b:a", "128k",  # Audio bitrate (reduced for smaller file size)
             "-ac", "2",  # 2 audio channels (stereo)
             "-ar", "48000",  # Audio sample rate
+            *self._muxing_queue_args(),
             output_path
         ])
         
@@ -775,6 +784,7 @@ class Predictor(BasePredictor):
             "-b:a", "128k",  # Audio bitrate (reduced for smaller file size)
             "-ac", "2",  # 2 audio channels (stereo)
             "-ar", "48000",  # Audio sample rate
+            *self._muxing_queue_args(),
             output_path
         ])
         
@@ -863,6 +873,7 @@ class Predictor(BasePredictor):
             "-c:a", "aac",
             "-b:a", audio_bitrate_str,
             "-movflags", "+faststart",
+            *self._muxing_queue_args(),
             output_path
         ])
 
