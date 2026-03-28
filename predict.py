@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import os
 import json
+from fractions import Fraction
 from cog import BasePredictor, Input, Path
 
 
@@ -220,18 +221,39 @@ class Predictor(BasePredictor):
                 "ffprobe",
                 "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=r_frame_rate",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+                "-of", "json",
                 input_path
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            fps_str = result.stdout.strip()
-            if '/' in fps_str:
-                num, den = fps_str.split('/')
-                return float(num) / float(den)
-            return float(fps_str)
-        except (subprocess.CalledProcessError, ValueError, ZeroDivisionError):
+            data = json.loads(result.stdout)
+            if "streams" in data and len(data["streams"]) > 0:
+                stream = data["streams"][0]
+                for field in ("avg_frame_rate", "r_frame_rate"):
+                    fps = self._parse_frame_rate(stream.get(field))
+                    if fps is not None:
+                        return fps
+        except (subprocess.CalledProcessError, ValueError, ZeroDivisionError, KeyError, json.JSONDecodeError):
             return 30.0  # Default to 30 fps if we can't determine
+        return 30.0
+
+    def _parse_frame_rate(self, value: str) -> float | None:
+        """Parse ffprobe frame-rate strings and reject clearly invalid metadata."""
+        if not value or value == "N/A":
+            return None
+
+        try:
+            fps = float(Fraction(value))
+        except (ValueError, ZeroDivisionError):
+            return None
+
+        # Mobile recordings occasionally expose the stream time base (for example
+        # 90000/1) as r_frame_rate. Treat implausible values as invalid and let
+        # callers fall back to a saner source.
+        if fps <= 0 or fps > 240:
+            return None
+
+        return fps
     
     def _get_video_resolution(self, input_path: str) -> tuple[int, int]:
         """Get the resolution (width, height) of the input video"""
@@ -499,9 +521,15 @@ class Predictor(BasePredictor):
         input_bitrate = self._get_video_bitrate(str(video))
         
         print(f"Input video: codec={input_codec}, FPS={fps}, resolution={width}x{height}, bitrate={input_bitrate}")
-        
+
         # Calculate keyframe interval for 2 seconds
-        keyframe_interval = int(fps * 2)
+        effective_fps = max(1.0, min(fps, 120.0))
+        keyframe_interval = max(2, int(round(effective_fps * 2)))
+        if abs(effective_fps - fps) > 0.01:
+            print(
+                f"Clamping source FPS from {fps} to {effective_fps} "
+                f"for stable keyframe intervals"
+            )
         
         # Determine target resolution - cap at 2K (1440p) for web efficiency
         # If input is larger, scale down while maintaining aspect ratio
