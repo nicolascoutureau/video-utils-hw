@@ -12,14 +12,56 @@ from cog import BasePredictor, Input, Path
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
-        # Check if NVIDIA GPU is available
+        self.cuda_decoder_available = False
+        self.cuda_scaling_available = False
+        self.nvenc_available = False
+
+        # Check if NVIDIA GPU is available and ffmpeg exposes the NVIDIA codecs
+        # we need. A visible GPU alone is not enough.
         try:
             subprocess.run(["nvidia-smi"], check=True, capture_output=True)
-            self.gpu_available = True
-            print("NVIDIA GPU detected, hardware acceleration available")
+            self.nvenc_available = self._ffmpeg_has_support("-encoders", "h264_nvenc")
+            self.cuda_decoder_available = self._ffmpeg_has_support("-decoders", "h264_cuvid")
+            self.cuda_scaling_available = self._ffmpeg_has_support("-filters", "scale_cuda")
+            self.gpu_available = self.nvenc_available
+
+            if self.gpu_available:
+                print("NVIDIA GPU and h264_nvenc detected, hardware encoding available")
+                if not self.cuda_decoder_available:
+                    print("ffmpeg is missing h264_cuvid, hardware path will use CPU decoding")
+                if not self.cuda_scaling_available:
+                    print("ffmpeg is missing scale_cuda, hardware path will use CPU scaling")
+            else:
+                print("NVIDIA GPU detected, but ffmpeg is missing h264_nvenc; will use software encoding")
         except (subprocess.CalledProcessError, FileNotFoundError):
             self.gpu_available = False
             print("No NVIDIA GPU detected, will use software encoding")
+
+    def _ffmpeg_cmd(self) -> list[str]:
+        """Base ffmpeg command with concise error output."""
+        return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+
+    def _ffmpeg_has_support(self, list_arg: str, name: str) -> bool:
+        """Check whether ffmpeg exposes a codec/filter in its capability lists."""
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", list_arg],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+        return name in result.stdout
+
+    def _format_process_error(self, error: subprocess.CalledProcessError) -> str:
+        """Extract the useful part of ffmpeg stderr for logging."""
+        stderr = error.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        stderr = (stderr or "").strip()
+        return stderr or str(error)
 
     def predict(
         self,
@@ -309,11 +351,15 @@ class Predictor(BasePredictor):
         input_codec: str
     ) -> bool:
         """Try to encode using hardware acceleration"""
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
         
         # Use hardware decoder if input is h264
-        if input_codec == "h264":
-            cmd.extend(["-c:v", "h264_cuvid"])
+        if input_codec == "h264" and self.cuda_decoder_available:
+            cmd.extend([
+                "-hwaccel", "cuda",
+                "-hwaccel_output_format", "cuda",
+                "-c:v", "h264_cuvid",
+            ])
         
         # Add trimming parameters
         if start_time != 0:
@@ -337,7 +383,7 @@ class Predictor(BasePredictor):
             subprocess.run(cmd, check=True, capture_output=True)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Hardware encoding failed: {e.stderr.decode('utf-8', errors='replace')}")
+            print(f"Hardware encoding failed: {self._format_process_error(e)}")
             return False
     
     def _encode_with_software(
@@ -350,7 +396,7 @@ class Predictor(BasePredictor):
         bitrate: str
     ):
         """Encode using software encoder (fallback)"""
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
         
         # Add trimming parameters
         if start_time != 0:
@@ -373,7 +419,7 @@ class Predictor(BasePredictor):
         try:
             subprocess.run(cmd, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
-            error_msg = f"Software encoding failed: {e.stderr.decode('utf-8', errors='replace')}"
+            error_msg = f"Software encoding failed: {self._format_process_error(e)}"
             print(error_msg)
             raise RuntimeError(error_msg)
     
@@ -386,10 +432,11 @@ class Predictor(BasePredictor):
         input_codec: str
     ) -> bool:
         """Try to encode preview using hardware acceleration"""
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
         
         # Use hardware decoder and hardware scaling if input is h264
-        if input_codec == "h264":
+        use_cuda_filters = input_codec == "h264" and self.cuda_decoder_available
+        if use_cuda_filters:
             cmd.extend([
                 "-hwaccel", "cuda",
                 "-hwaccel_output_format", "cuda",
@@ -407,7 +454,7 @@ class Predictor(BasePredictor):
         cmd.extend(["-i", input_path])
         
         # Use GPU-accelerated scaling if we have hardware decoding
-        if input_codec == "h264":
+        if use_cuda_filters and self.cuda_scaling_available:
             cmd.extend([
                 "-vf", "scale_cuda=-2:480",  # GPU-accelerated scaling to 480p
             ])
@@ -419,7 +466,7 @@ class Predictor(BasePredictor):
         # Optimized hardware encoding parameters
         cmd.extend([
             "-c:v", "h264_nvenc",  # NVIDIA hardware encoder
-            "-preset", "p4",  # P4 preset for balanced quality/speed (p1-p7, p4 is medium)
+            "-preset", "medium",  # Legacy-compatible NVENC preset
             "-tune", "hq",  # High quality tuning
             "-rc", "vbr",  # Variable bitrate mode
             "-rc-lookahead", "20",  # Lookahead for better quality
@@ -442,7 +489,7 @@ class Predictor(BasePredictor):
             subprocess.run(cmd, check=True, capture_output=True)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Hardware preview encoding failed: {e.stderr.decode('utf-8', errors='replace')}")
+            print(f"Hardware preview encoding failed: {self._format_process_error(e)}")
             return False
     
     def _encode_preview_with_software(
@@ -453,7 +500,7 @@ class Predictor(BasePredictor):
         end_time: float
     ):
         """Encode preview using software encoder with web optimization"""
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
         
         # Add trimming parameters
         if start_time != 0:
@@ -487,7 +534,7 @@ class Predictor(BasePredictor):
         try:
             subprocess.run(cmd, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
-            error_msg = f"Software preview encoding failed: {e.stderr.decode('utf-8', errors='replace')}"
+            error_msg = f"Software preview encoding failed: {self._format_process_error(e)}"
             print(error_msg)
             raise RuntimeError(error_msg)
     
@@ -603,10 +650,11 @@ class Predictor(BasePredictor):
         max_bitrate: str
     ) -> bool:
         """Try to encode web-optimized video using hardware acceleration"""
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
         
         # Use hardware decoder if input is h264
-        if input_codec == "h264":
+        use_cuda_filters = input_codec == "h264" and self.cuda_decoder_available
+        if use_cuda_filters:
             cmd.extend([
                 "-hwaccel", "cuda",
                 "-hwaccel_output_format", "cuda",
@@ -624,7 +672,7 @@ class Predictor(BasePredictor):
         cmd.extend(["-i", input_path])
         
         # Apply scaling if needed (using GPU-accelerated scaling)
-        if scale_filter and input_codec == "h264":
+        if scale_filter and use_cuda_filters and self.cuda_scaling_available:
             # Use GPU scaling for h264 input
             scale_filter_gpu = scale_filter.replace("scale=", "scale_cuda=")
             cmd.extend(["-vf", scale_filter_gpu])
@@ -640,7 +688,7 @@ class Predictor(BasePredictor):
         # Use CQ 23 for good quality with smaller file sizes
         cmd.extend([
             "-c:v", "h264_nvenc",  # NVIDIA hardware encoder
-            "-preset", "p4",  # Medium preset (p4) for quality/speed balance
+            "-preset", "medium",  # Legacy-compatible NVENC preset
             "-profile:v", "high",  # High profile for better compression efficiency
             "-rc", "vbr",  # Variable bitrate mode
             "-cq", "23",  # Constant quality (similar to CRF 23) for good quality with smaller files
@@ -665,7 +713,7 @@ class Predictor(BasePredictor):
             subprocess.run(cmd, check=True, capture_output=True)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Hardware web encoding failed: {e.stderr.decode('utf-8', errors='replace')}")
+            print(f"Hardware web encoding failed: {self._format_process_error(e)}")
             return False
     
     def _encode_web_with_software(
@@ -680,7 +728,7 @@ class Predictor(BasePredictor):
         max_bitrate: str
     ):
         """Encode web-optimized video using software encoder"""
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
         
         # Add trimming parameters
         if start_time != 0:
@@ -733,7 +781,7 @@ class Predictor(BasePredictor):
         try:
             subprocess.run(cmd, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
-            error_msg = f"Software web encoding failed: {e.stderr.decode('utf-8', errors='replace')}"
+            error_msg = f"Software web encoding failed: {self._format_process_error(e)}"
             print(error_msg)
             raise RuntimeError(error_msg)
 
@@ -781,7 +829,7 @@ class Predictor(BasePredictor):
         print(f"trim_precise: start={start_time}, end={end_time}, "
               f"audio_bitrate={audio_bitrate_str}")
 
-        cmd = ["ffmpeg", "-y"]
+        cmd = self._ffmpeg_cmd()
 
         # Seek to start time
         if start_time != 0:
@@ -799,7 +847,7 @@ class Predictor(BasePredictor):
         if self.gpu_available:
             cmd.extend([
                 "-c:v", "h264_nvenc",
-                "-preset", "p7",
+                "-preset", "slow",
                 "-rc", "vbr",
                 "-cq", "17",
                 "-b:v", "0",
@@ -824,11 +872,11 @@ class Predictor(BasePredictor):
             return Path(output_path)
         except subprocess.CalledProcessError as e:
             print(f"trim_precise re-encode failed, falling back to stream copy: "
-                  f"{e.stderr.decode('utf-8', errors='replace')}")
+                  f"{self._format_process_error(e)}")
             # Fallback: stream copy (fast but may not be frame-accurate)
             if os.path.exists(output_path):
                 os.unlink(output_path)
-            fallback_cmd = ["ffmpeg", "-y"]
+            fallback_cmd = self._ffmpeg_cmd()
             if start_time != 0:
                 fallback_cmd.extend(["-ss", str(start_time)])
             fallback_cmd.extend(["-i", input_path])
@@ -842,6 +890,6 @@ class Predictor(BasePredictor):
             except subprocess.CalledProcessError as e2:
                 if os.path.exists(output_path):
                     os.unlink(output_path)
-                error_msg = f"trim_precise fallback failed: {e2.stderr.decode('utf-8', errors='replace')}"
+                error_msg = f"trim_precise fallback failed: {self._format_process_error(e2)}"
                 print(error_msg)
                 raise RuntimeError(error_msg)
